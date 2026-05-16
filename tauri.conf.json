@@ -1,0 +1,9 @@
+{
+  "productName": "GrokForge Prime",
+  "version": "1.0.0",
+  "identifier": "com.grokforge.prime",
+  "build": {
+    "devPath": "../src",
+    "distDir": "../dist"
+  }
+}
