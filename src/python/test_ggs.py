@@ -78,8 +78,14 @@ class TestSandbox(SandboxTestCase):
         # If the OS cannot start the process, run() must return a result
         # dict so the node fails cleanly, rather than raising.
         with mock.patch("ggs_engine.subprocess.run",
-                        side_effect=OSError("exec failed")):
+                        side_effect=OSError("exec failed")) as mocked_run:
             result = self.box.run(["echo", "ok"])
+        # Confirm run() really invoked subprocess.run with our command, so a
+        # refactor that drops the call cannot pass silently. The command is
+        # checked positionally; kwargs are left unasserted to avoid coupling
+        # the test to every subprocess option.
+        mocked_run.assert_called_once()
+        self.assertEqual(mocked_run.call_args.args[0], ["echo", "ok"])
         self.assertEqual(result["exit_code"], -1)
         self.assertIn("failed to run", result["stderr"])
         self.assertFalse(result["timed_out"])
