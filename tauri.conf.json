@@ -3,7 +3,15 @@
   "version": "1.0.0",
   "identifier": "com.grokforge.prime",
   "build": {
-    "devPath": "../src",
-    "distDir": "../dist"
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "GrokForge Prime",
+        "width": 1100,
+        "height": 720
+      }
+    ]
   }
 }
