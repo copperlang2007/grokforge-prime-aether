@@ -154,6 +154,52 @@ def test_sandbox_escape_via_action() -> None:
     check("escaping action fails the graph", result["status"] == "failed")
 
 
+def test_delete_file_action() -> None:
+    graph = {"nodes": [
+        {"id": "make", "action": {"type": "write_file", "path": "x", "content": "x"}},
+        {"id": "drop", "deps": ["make"],
+         "action": {"type": "delete_file", "path": "x"},
+         "verifier": {"type": "file_absent", "path": "x"}},
+    ]}
+    result = run_ggs(graph)
+    check("delete_file removes the file", result["status"] == "verified")
+
+
+def test_unknown_action_type() -> None:
+    result = run_ggs({"nodes": [{"id": "n", "action": {"type": "teleport"}}]})
+    check("unknown action type fails the node", result["status"] == "failed")
+
+
+def test_unknown_verifier_type() -> None:
+    graph = {"nodes": [
+        {"id": "n", "action": {"type": "noop"}, "verifier": {"type": "telepathy"}},
+    ]}
+    result = run_ggs(graph)
+    check("unknown verifier type fails the node", result["status"] == "failed")
+
+
+def test_missing_node_id() -> None:
+    raised = False
+    try:
+        run_ggs({"nodes": [{"action": {"type": "noop"}}]})
+    except GGSError:
+        raised = True
+    check("node with no id is rejected", raised)
+
+
+def test_run_arg_jail() -> None:
+    with tempfile.TemporaryDirectory() as root:
+        box = Sandbox(root)
+        blocked = False
+        try:
+            box.run(["cat", "/etc/passwd"])
+        except SandboxViolation:
+            blocked = True
+        check("run arg with absolute path blocked", blocked)
+        ok = box.run(["echo", "safe-token"])
+        check("run arg bare token allowed", ok["exit_code"] == 0)
+
+
 def test_diamond_dag_order() -> None:
     graph = {"nodes": [
         {"id": "a", "action": {"type": "write_file", "path": "a", "content": "A"}},
@@ -183,6 +229,11 @@ def main() -> int:
         test_provenance_chain,
         test_provenance_tamper_detected,
         test_sandbox_escape_via_action,
+        test_delete_file_action,
+        test_unknown_action_type,
+        test_unknown_verifier_type,
+        test_missing_node_id,
+        test_run_arg_jail,
         test_diamond_dag_order,
     ]:
         test()

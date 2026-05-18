@@ -34,8 +34,12 @@ A GGS graph is a DAG of nodes:
 1. **Schedule** — topological sort of the DAG; cycles and dangling
    dependencies are rejected before anything runs.
 2. **Sandbox** — every node runs in a path-jailed working directory.
-   File actions cannot escape the jail; `run` actions are limited to a
-   command allowlist with a timeout and a minimal environment.
+   File actions cannot escape the jail. `run` actions are limited to a
+   command allowlist that excludes interpreters like `python3` (whose
+   arguments are arbitrary code no allowlist can vet); path-like command
+   arguments are jail-checked too, so an allowlisted command cannot read
+   or write outside the root. Commands run with a timeout and a minimal
+   environment.
 3. **Act + verify** — execute the action, then run the verifier.
 4. **Rollback** — if the verifier fails (or the action errors), the
    node's rollback actions run, and the node is marked `rolled_back`.

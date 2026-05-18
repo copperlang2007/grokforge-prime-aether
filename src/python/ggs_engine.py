@@ -32,11 +32,12 @@ GENESIS_HASH = hashlib.sha256(b"GGS-GENESIS-v1").hexdigest()
 
 # Commands permitted inside `run` actions and command-based verifiers. Anything
 # that can mutate state outside the sandbox (rm, mv across roots, curl, ...) is
-# intentionally excluded. File mutation happens through structured actions.
+# intentionally excluded, as are interpreters like `python3` whose arguments are
+# arbitrary code that no allowlist can vet. File mutation happens through
+# structured actions; path-like command arguments are jail-checked separately.
 ALLOWED_COMMANDS = {
     "cat", "cut", "date", "echo", "false", "grep", "head", "ls", "mkdir",
-    "printf", "pwd", "python3", "sed", "sort", "tail", "test", "touch",
-    "tr", "true", "wc",
+    "printf", "pwd", "sed", "sort", "tail", "test", "touch", "tr", "true", "wc",
 }
 
 COMMAND_TIMEOUT_SECONDS = 10
@@ -76,9 +77,16 @@ class Sandbox:
     def run(self, cmd: list[str], stdin: str | None = None) -> dict[str, Any]:
         if not cmd or not isinstance(cmd, list):
             raise GGSError("run command must be a non-empty list")
+        if not all(isinstance(part, str) for part in cmd):
+            raise GGSError("run command parts must all be strings")
         program = cmd[0]
         if program not in ALLOWED_COMMANDS:
             raise SandboxViolation(f"command not allowed: {program!r}")
+        for arg in cmd[1:]:
+            if self._arg_escapes_jail(arg):
+                raise SandboxViolation(
+                    f"command argument escapes sandbox: {arg!r}"
+                )
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
         try:
             proc = subprocess.run(
@@ -92,12 +100,34 @@ class Sandbox:
             )
         except subprocess.TimeoutExpired:
             return {"exit_code": -1, "stdout": "", "stderr": "timeout", "timed_out": True}
+        except OSError as exc:
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": f"failed to run {program!r}: {exc}",
+                "timed_out": False,
+            }
         return {
             "exit_code": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
             "timed_out": False,
         }
+
+    def _arg_escapes_jail(self, arg: str) -> bool:
+        """True if a path-like command argument resolves outside the jail.
+
+        Flags (``-x``) and bare tokens with no path separator are left alone:
+        they either are not paths or stay inside the working directory.
+        Absolute paths and anything containing ``/`` or a bare ``..`` are
+        resolved against the sandbox root and rejected if they escape it.
+        This is what keeps allowlisted commands (``cat``, ``sed``, ``touch``)
+        from reading or writing outside the jail.
+        """
+        if arg.startswith("-") or not ("/" in arg or arg == ".."):
+            return False
+        candidate = (self.root / arg).resolve()
+        return candidate != self.root and self.root not in candidate.parents
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +301,18 @@ def run_ggs(graph: dict[str, Any], workdir: str | None = None) -> dict[str, Any]
     nodes = graph["nodes"]
     if not isinstance(nodes, list) or not nodes:
         raise GGSError("graph 'nodes' must be a non-empty array")
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GGSError("each node must be an object")
+        node_id = node.get("id")
+        if not isinstance(node_id, str) or not node_id:
+            raise GGSError("each node must have a non-empty string 'id'")
+        if not isinstance(node.get("action"), dict):
+            raise GGSError(f"node {node_id!r} must have an 'action' object")
+        deps = node.get("deps", [])
+        if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+            raise GGSError(f"node {node_id!r} 'deps' must be a list of strings")
 
     order = _topological_order(nodes)
     by_id = {node["id"]: node for node in nodes}

@@ -79,14 +79,16 @@ TASKS: list[dict] = [
         "oracle": [("file_contains", "log", "line2")],
     },
     {
-        "name": "run_python_inline",
+        "name": "run_command_verified",
         "graph": {"nodes": [
-            {"id": "p", "action": {"type": "run",
-                                   "cmd": ["python3", "-c",
-                                           "open('out.txt','w').write('42')"]},
-             "verifier": {"type": "file_equals", "path": "out.txt", "content": "42"}},
+            {"id": "w", "action": {"type": "write_file", "path": "data.txt",
+                                   "content": "alpha\nbeta\ngamma\n"}},
+            {"id": "g", "deps": ["w"],
+             "action": {"type": "run", "cmd": ["grep", "beta", "data.txt"]},
+             "verifier": {"type": "cmd_output_contains",
+                          "cmd": ["grep", "beta", "data.txt"], "text": "beta"}},
         ]},
-        "oracle": [("file_equals", "out.txt", "42")],
+        "oracle": [("file_contains", "data.txt", "gamma")],
     },
     {
         "name": "rollback_on_bad_verifier",
@@ -118,15 +120,16 @@ TASKS: list[dict] = [
     },
     {
         "name": "sandbox_escape_blocked",
-        # An action tries to write outside the sandbox. The engine must refuse
-        # the action and roll back, touching nothing outside the jail.
+        # An action tries to write one level above the sandbox root. The
+        # engine must refuse it; the oracle checks the *actual* escape
+        # target (workdir/../escaped.txt) to confirm nothing was written.
         "graph": {"nodes": [
             {"id": "escape",
-             "action": {"type": "write_file", "path": "../../escaped.txt",
+             "action": {"type": "write_file", "path": "../escaped.txt",
                         "content": "pwned"},
              "rollback": []},
         ]},
-        "oracle": [("file_absent", "escaped.txt")],
+        "oracle": [("file_absent", "../escaped.txt")],
         "expect_status": "failed",
     },
     {

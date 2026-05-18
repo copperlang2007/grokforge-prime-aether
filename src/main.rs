@@ -2,8 +2,24 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Locate the GGS engine script that ships with this crate.
+/// Locate the GGS engine script.
+///
+/// Resolution order:
+///   1. an explicit `GGS_ENGINE_PATH` environment override;
+///   2. a copy bundled next to the executable (packaged builds);
+///   3. the source tree, for dev builds via `cargo tauri dev`.
 fn engine_path() -> PathBuf {
+    if let Ok(path) = std::env::var("GGS_ENGINE_PATH") {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("python").join("ggs_engine.py");
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("python")
@@ -40,13 +56,28 @@ fn execute_ggs(graph: serde_json::Value) -> Result<serde_json::Value, String> {
 
     if output.stdout.is_empty() {
         return Err(format!(
-            "GGS engine produced no output: {}",
+            "GGS engine produced no output (exit {:?}): {}",
+            output.status.code(),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
 
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("invalid engine output: {e}"))
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("invalid engine output: {e}"))?;
+
+    // The engine exits non-zero for a *verification failure* (a valid result
+    // the caller still wants, ledger included) as well as for a hard error.
+    // The JSON `status` field is the source of truth: only "error" is a
+    // genuine failure of the command itself.
+    if result.get("status").and_then(|s| s.as_str()) == Some("error") {
+        return Err(result
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("unknown GGS engine error")
+            .to_string());
+    }
+
+    Ok(result)
 }
 
 fn main() {
