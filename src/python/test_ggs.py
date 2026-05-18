@@ -12,9 +12,9 @@ Run:
 
 from __future__ import annotations
 
-import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from ggs_engine import (
     GENESIS_HASH,
@@ -29,14 +29,16 @@ from ggs_engine import (
 
 
 class SandboxTestCase(unittest.TestCase):
-    """Base case providing a fresh, isolated sandbox per test."""
+    """Base case providing a fresh, isolated sandbox per test.
+
+    The temp directory is registered with ``addCleanup`` so it is removed
+    even if a later part of ``setUp`` fails.
+    """
 
     def setUp(self) -> None:
-        self._tmp = tempfile.mkdtemp(prefix="ggs_test_")
-        self.box = Sandbox(self._tmp)
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self._tmp, ignore_errors=True)
+        tmp = tempfile.TemporaryDirectory(prefix="ggs_test_")
+        self.addCleanup(tmp.cleanup)
+        self.box = Sandbox(tmp.name)
 
 
 class TestSandbox(SandboxTestCase):
@@ -72,12 +74,15 @@ class TestSandbox(SandboxTestCase):
     def test_run_arg_bare_token_allowed(self) -> None:
         self.assertEqual(self.box.run(["echo", "plain-token"])["exit_code"], 0)
 
-    def test_missing_executable_does_not_crash(self) -> None:
-        # 'sed' is allowlisted; deleting it from PATH is impractical, so we
-        # exercise the OSError path indirectly: a command that cannot run
-        # must yield a result dict, never raise.
-        result = self.box.run(["echo", "ok"])
-        self.assertIn("exit_code", result)
+    def test_run_returns_failure_dict_on_oserror(self) -> None:
+        # If the OS cannot start the process, run() must return a result
+        # dict so the node fails cleanly, rather than raising.
+        with mock.patch("ggs_engine.subprocess.run",
+                        side_effect=OSError("exec failed")):
+            result = self.box.run(["echo", "ok"])
+        self.assertEqual(result["exit_code"], -1)
+        self.assertIn("failed to run", result["stderr"])
+        self.assertFalse(result["timed_out"])
 
 
 class TestActions(SandboxTestCase):
@@ -258,6 +263,13 @@ class TestEngine(unittest.TestCase):
     def test_unknown_action_fails_node(self) -> None:
         result = run_ggs({"nodes": [{"id": "n",
                                      "action": {"type": "teleport"}}]})
+        self.assertEqual(result["status"], "failed")
+
+    def test_unknown_verifier_fails_node(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "n", "action": {"type": "noop"},
+             "verifier": {"type": "telepathy"}},
+        ]})
         self.assertEqual(result["status"], "failed")
 
     def test_sandbox_escape_via_action_fails(self) -> None:
