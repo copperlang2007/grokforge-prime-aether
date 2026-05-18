@@ -88,8 +88,13 @@ class Sandbox:
                     f"command argument escapes sandbox: {arg!r}"
                 )
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"}
+        # Safe by construction: shell=False (default) with an argument list, so
+        # no shell metacharacter interpretation; cmd[0] is allowlisted and
+        # path-like arguments are jail-checked above. There is no injection
+        # surface, so the static "dangerous-subprocess-use" audit rule is a
+        # false positive here.
         try:
-            proc = subprocess.run(
+            proc = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 cmd,
                 cwd=self.root,
                 env=env,
