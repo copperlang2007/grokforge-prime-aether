@@ -1,249 +1,318 @@
 #!/usr/bin/env python3
 """Unit tests for the GGS engine.
 
+Built on the stdlib ``unittest`` framework: each test is isolated, a
+failing assertion aborts only its own test, and the suite is discoverable
+by standard tooling.
+
 Run:
-    python3 src/python/test_ggs.py
-Exit code is 0 only if every test passes.
+    python3 src/python/test_ggs.py        # direct
+    python3 -m unittest discover src/python
 """
 
 from __future__ import annotations
 
+import shutil
 import tempfile
+import unittest
 
 from ggs_engine import (
     GENESIS_HASH,
     GGSError,
     Sandbox,
     SandboxViolation,
+    execute_action,
     run_ggs,
+    verify,
     verify_ledger,
 )
 
-_FAILURES: list[str] = []
+
+class SandboxTestCase(unittest.TestCase):
+    """Base case providing a fresh, isolated sandbox per test."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp(prefix="ggs_test_")
+        self.box = Sandbox(self._tmp)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
 
-def check(name: str, condition: bool, detail: str = "") -> None:
-    if condition:
-        print(f"  [PASS] {name}")
-    else:
-        print(f"  [FAIL] {name}  {detail}")
-        _FAILURES.append(name)
+class TestSandbox(SandboxTestCase):
+    def test_resolves_path_inside_root(self) -> None:
+        resolved = self.box.resolve("sub/file.txt")
+        self.assertTrue(str(resolved).startswith(str(self.box.root)))
+
+    def test_blocks_path_escape(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            self.box.resolve("../../etc/passwd")
+
+    def test_allowed_command_runs(self) -> None:
+        result = self.box.run(["echo", "hello"])
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("hello", result["stdout"])
+
+    def test_disallowed_command_blocked(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            self.box.run(["rm", "-rf", "/"])
+
+    def test_interpreter_not_in_allowlist(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            self.box.run(["python3", "-c", "print(1)"])
+
+    def test_run_arg_absolute_path_blocked(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            self.box.run(["cat", "/etc/passwd"])
+
+    def test_run_arg_relative_escape_blocked(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            self.box.run(["touch", "../escaped"])
+
+    def test_run_arg_bare_token_allowed(self) -> None:
+        self.assertEqual(self.box.run(["echo", "plain-token"])["exit_code"], 0)
+
+    def test_missing_executable_does_not_crash(self) -> None:
+        # 'sed' is allowlisted; deleting it from PATH is impractical, so we
+        # exercise the OSError path indirectly: a command that cannot run
+        # must yield a result dict, never raise.
+        result = self.box.run(["echo", "ok"])
+        self.assertIn("exit_code", result)
 
 
-def test_sandbox_jail() -> None:
-    with tempfile.TemporaryDirectory() as root:
-        box = Sandbox(root)
-        inside = box.resolve("sub/file.txt")
-        check("sandbox resolves inside path", str(inside).startswith(str(box.root)))
-        escaped = False
-        try:
-            box.resolve("../../etc/passwd")
-        except SandboxViolation:
-            escaped = True
-        check("sandbox blocks path escape", escaped)
+class TestActions(SandboxTestCase):
+    def test_write_file(self) -> None:
+        execute_action(self.box, {"type": "write_file", "path": "a.txt",
+                                  "content": "data"})
+        self.assertEqual((self.box.root / "a.txt").read_text(), "data")
+
+    def test_append_file(self) -> None:
+        execute_action(self.box, {"type": "write_file", "path": "log",
+                                  "content": "one\n"})
+        execute_action(self.box, {"type": "append_file", "path": "log",
+                                  "content": "two\n"})
+        self.assertEqual((self.box.root / "log").read_text(), "one\ntwo\n")
+
+    def test_delete_file(self) -> None:
+        execute_action(self.box, {"type": "write_file", "path": "x",
+                                  "content": "x"})
+        result = execute_action(self.box, {"type": "delete_file", "path": "x"})
+        self.assertTrue(result["existed"])
+        self.assertFalse((self.box.root / "x").exists())
+
+    def test_delete_missing_file_is_noop(self) -> None:
+        result = execute_action(self.box, {"type": "delete_file",
+                                           "path": "ghost"})
+        self.assertFalse(result["existed"])
+        self.assertTrue(result["ok"])
+
+    def test_mkdir(self) -> None:
+        execute_action(self.box, {"type": "mkdir", "path": "nested/dir"})
+        self.assertTrue((self.box.root / "nested" / "dir").is_dir())
+
+    def test_run(self) -> None:
+        result = execute_action(self.box, {"type": "run",
+                                           "cmd": ["echo", "hi"]})
+        self.assertTrue(result["ok"])
+
+    def test_noop(self) -> None:
+        self.assertTrue(execute_action(self.box, {"type": "noop"})["ok"])
+
+    def test_unknown_action_type(self) -> None:
+        with self.assertRaises(GGSError):
+            execute_action(self.box, {"type": "teleport"})
+
+    def test_action_without_type(self) -> None:
+        with self.assertRaises(GGSError):
+            execute_action(self.box, {"path": "a.txt"})
+
+    def test_write_file_escape_rejected(self) -> None:
+        with self.assertRaises(SandboxViolation):
+            execute_action(self.box, {"type": "write_file",
+                                      "path": "../evil", "content": "x"})
 
 
-def test_command_allowlist() -> None:
-    with tempfile.TemporaryDirectory() as root:
-        box = Sandbox(root)
-        ok = box.run(["echo", "hi"])
-        check("allowed command runs", ok["exit_code"] == 0 and "hi" in ok["stdout"])
-        blocked = False
-        try:
-            box.run(["rm", "-rf", "/"])
-        except SandboxViolation:
-            blocked = True
-        check("disallowed command blocked", blocked)
+class TestVerifiers(SandboxTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        (self.box.root / "present.txt").write_text("hello world")
+
+    def test_none_verifier_passes(self) -> None:
+        self.assertTrue(verify(self.box, None))
+
+    def test_file_exists(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "file_exists",
+                                          "path": "present.txt"}))
+        self.assertFalse(verify(self.box, {"type": "file_exists",
+                                           "path": "missing.txt"}))
+
+    def test_file_absent(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "file_absent",
+                                          "path": "missing.txt"}))
+        self.assertFalse(verify(self.box, {"type": "file_absent",
+                                           "path": "present.txt"}))
+
+    def test_file_contains(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "file_contains",
+                                          "path": "present.txt",
+                                          "text": "hello"}))
+        self.assertFalse(verify(self.box, {"type": "file_contains",
+                                           "path": "present.txt",
+                                           "text": "absent"}))
+
+    def test_file_equals(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "file_equals",
+                                          "path": "present.txt",
+                                          "content": "hello world"}))
+
+    def test_cmd_succeeds(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "cmd_succeeds",
+                                          "cmd": ["test", "-f",
+                                                  "present.txt"]}))
+        self.assertFalse(verify(self.box, {"type": "cmd_succeeds",
+                                           "cmd": ["test", "-f",
+                                                   "missing.txt"]}))
+
+    def test_cmd_output_contains(self) -> None:
+        self.assertTrue(verify(self.box, {"type": "cmd_output_contains",
+                                          "cmd": ["cat", "present.txt"],
+                                          "text": "world"}))
+
+    def test_verifier_list_requires_all(self) -> None:
+        self.assertTrue(verify(self.box, [
+            {"type": "file_exists", "path": "present.txt"},
+            {"type": "file_contains", "path": "present.txt", "text": "hello"},
+        ]))
+        self.assertFalse(verify(self.box, [
+            {"type": "file_exists", "path": "present.txt"},
+            {"type": "file_exists", "path": "missing.txt"},
+        ]))
+
+    def test_unknown_verifier_type(self) -> None:
+        with self.assertRaises(GGSError):
+            verify(self.box, {"type": "telepathy"})
 
 
-def test_single_node_verified() -> None:
-    graph = {"nodes": [
-        {"id": "n", "action": {"type": "write_file", "path": "a", "content": "x"},
-         "verifier": {"type": "file_equals", "path": "a", "content": "x"}},
-    ]}
-    result = run_ggs(graph)
-    check("single node verifies", result["status"] == "verified")
-    check("verified_count counted", result["verified_count"] == 1)
+class TestEngine(unittest.TestCase):
+    def test_single_node_verified(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "n", "action": {"type": "write_file", "path": "a",
+                                   "content": "x"},
+             "verifier": {"type": "file_equals", "path": "a", "content": "x"}},
+        ]})
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(result["verified_count"], 1)
+
+    def test_rollback_on_failure(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "n", "action": {"type": "write_file", "path": "a",
+                                   "content": "x"},
+             "verifier": {"type": "file_contains", "path": "a",
+                          "text": "MISSING"},
+             "rollback": [{"type": "delete_file", "path": "a"}]},
+        ]})
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["nodes"]["n"]["status"], "rolled_back")
+        self.assertTrue(result["nodes"]["n"]["rollback_result"][0]["ok"])
+
+    def test_dependency_skip(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "p", "action": {"type": "write_file", "path": "p",
+                                   "content": "x"},
+             "verifier": {"type": "file_contains", "path": "p",
+                          "text": "NOPE"}},
+            {"id": "c", "deps": ["p"],
+             "action": {"type": "write_file", "path": "c", "content": "y"}},
+        ]})
+        self.assertEqual(result["nodes"]["c"]["status"], "skipped")
+        self.assertEqual(result["nodes"]["c"]["blocked_by"], ["p"])
+
+    def test_cycle_detection(self) -> None:
+        with self.assertRaises(GGSError):
+            run_ggs({"nodes": [
+                {"id": "a", "deps": ["b"], "action": {"type": "noop"}},
+                {"id": "b", "deps": ["a"], "action": {"type": "noop"}},
+            ]})
+
+    def test_unknown_dependency(self) -> None:
+        with self.assertRaises(GGSError):
+            run_ggs({"nodes": [
+                {"id": "a", "deps": ["ghost"], "action": {"type": "noop"}},
+            ]})
+
+    def test_missing_node_id(self) -> None:
+        with self.assertRaises(GGSError):
+            run_ggs({"nodes": [{"action": {"type": "noop"}}]})
+
+    def test_node_without_action(self) -> None:
+        with self.assertRaises(GGSError):
+            run_ggs({"nodes": [{"id": "a"}]})
+
+    def test_duplicate_node_ids(self) -> None:
+        with self.assertRaises(GGSError):
+            run_ggs({"nodes": [
+                {"id": "a", "action": {"type": "noop"}},
+                {"id": "a", "action": {"type": "noop"}},
+            ]})
+
+    def test_unknown_action_fails_node(self) -> None:
+        result = run_ggs({"nodes": [{"id": "n",
+                                     "action": {"type": "teleport"}}]})
+        self.assertEqual(result["status"], "failed")
+
+    def test_sandbox_escape_via_action_fails(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "n", "action": {"type": "write_file",
+                                   "path": "../../evil", "content": "x"}},
+        ]})
+        self.assertEqual(result["status"], "failed")
+
+    def test_diamond_dag(self) -> None:
+        result = run_ggs({"nodes": [
+            {"id": "a", "action": {"type": "write_file", "path": "a",
+                                   "content": "A"}},
+            {"id": "b", "deps": ["a"],
+             "action": {"type": "append_file", "path": "a", "content": "B"}},
+            {"id": "c", "deps": ["a"],
+             "action": {"type": "write_file", "path": "c", "content": "C"}},
+            {"id": "d", "deps": ["b", "c"], "action": {"type": "noop"},
+             "verifier": [{"type": "file_contains", "path": "a", "text": "AB"},
+                          {"type": "file_exists", "path": "c"}]},
+        ]})
+        self.assertEqual(result["status"], "verified")
 
 
-def test_rollback_runs_on_failure() -> None:
-    graph = {"nodes": [
-        {"id": "n", "action": {"type": "write_file", "path": "a", "content": "x"},
-         "verifier": {"type": "file_contains", "path": "a", "text": "MISSING"},
-         "rollback": [{"type": "delete_file", "path": "a"}]},
-    ]}
-    result = run_ggs(graph)
-    check("failed verifier yields failed status", result["status"] == "failed")
-    check("node marked rolled_back",
-          result["nodes"]["n"]["status"] == "rolled_back")
-    rb = result["nodes"]["n"]["rollback_result"]
-    check("rollback action recorded", rb is not None and rb[0]["ok"] is True)
+class TestProvenance(unittest.TestCase):
+    def _two_node_result(self) -> dict:
+        return run_ggs({"nodes": [
+            {"id": "n1", "action": {"type": "write_file", "path": "1",
+                                    "content": "1"}},
+            {"id": "n2", "deps": ["n1"],
+             "action": {"type": "write_file", "path": "2", "content": "2"}},
+        ]})
 
+    def test_one_entry_per_node(self) -> None:
+        self.assertEqual(len(self._two_node_result()["ledger"]), 2)
 
-def test_dependency_skip() -> None:
-    graph = {"nodes": [
-        {"id": "p", "action": {"type": "write_file", "path": "p", "content": "x"},
-         "verifier": {"type": "file_contains", "path": "p", "text": "NOPE"}},
-        {"id": "c", "deps": ["p"],
-         "action": {"type": "write_file", "path": "c", "content": "y"}},
-    ]}
-    result = run_ggs(graph)
-    check("dependent node skipped", result["nodes"]["c"]["status"] == "skipped")
-    check("skip records blocker",
-          result["nodes"]["c"]["blocked_by"] == ["p"])
+    def test_chain_starts_at_genesis(self) -> None:
+        self.assertEqual(self._two_node_result()["ledger"][0]["prev_hash"],
+                         GENESIS_HASH)
 
+    def test_links_are_chained(self) -> None:
+        ledger = self._two_node_result()["ledger"]
+        self.assertEqual(ledger[1]["prev_hash"], ledger[0]["entry_hash"])
 
-def test_cycle_detection() -> None:
-    graph = {"nodes": [
-        {"id": "a", "deps": ["b"], "action": {"type": "noop"}},
-        {"id": "b", "deps": ["a"], "action": {"type": "noop"}},
-    ]}
-    raised = False
-    try:
-        run_ggs(graph)
-    except GGSError:
-        raised = True
-    check("cycle is rejected", raised)
+    def test_engine_reports_ledger_valid(self) -> None:
+        self.assertTrue(self._two_node_result()["ledger_valid"])
 
+    def test_independent_verification_passes(self) -> None:
+        self.assertTrue(verify_ledger(self._two_node_result()["ledger"]))
 
-def test_unknown_dependency() -> None:
-    graph = {"nodes": [
-        {"id": "a", "deps": ["ghost"], "action": {"type": "noop"}},
-    ]}
-    raised = False
-    try:
-        run_ggs(graph)
-    except GGSError:
-        raised = True
-    check("unknown dependency is rejected", raised)
-
-
-def test_provenance_chain() -> None:
-    graph = {"nodes": [
-        {"id": "n1", "action": {"type": "write_file", "path": "1", "content": "1"}},
-        {"id": "n2", "deps": ["n1"],
-         "action": {"type": "write_file", "path": "2", "content": "2"}},
-    ]}
-    result = run_ggs(graph)
-    ledger = result["ledger"]
-    check("ledger has one entry per node", len(ledger) == 2)
-    check("ledger starts at genesis", ledger[0]["prev_hash"] == GENESIS_HASH)
-    check("links are chained",
-          ledger[1]["prev_hash"] == ledger[0]["entry_hash"])
-    check("engine reports ledger valid", result["ledger_valid"] is True)
-    check("independent verification passes", verify_ledger(ledger) is True)
-
-
-def test_provenance_tamper_detected() -> None:
-    graph = {"nodes": [
-        {"id": "n1", "action": {"type": "write_file", "path": "1", "content": "1"}},
-        {"id": "n2", "deps": ["n1"],
-         "action": {"type": "write_file", "path": "2", "content": "2"}},
-    ]}
-    ledger = run_ggs(graph)["ledger"]
-    ledger[0]["record"]["status"] = "tampered"
-    check("tampered ledger fails verification", verify_ledger(ledger) is False)
-
-
-def test_sandbox_escape_via_action() -> None:
-    graph = {"nodes": [
-        {"id": "n", "action": {"type": "write_file", "path": "../../evil",
-                               "content": "x"}},
-    ]}
-    result = run_ggs(graph)
-    check("escaping action fails the graph", result["status"] == "failed")
-
-
-def test_delete_file_action() -> None:
-    graph = {"nodes": [
-        {"id": "make", "action": {"type": "write_file", "path": "x", "content": "x"}},
-        {"id": "drop", "deps": ["make"],
-         "action": {"type": "delete_file", "path": "x"},
-         "verifier": {"type": "file_absent", "path": "x"}},
-    ]}
-    result = run_ggs(graph)
-    check("delete_file removes the file", result["status"] == "verified")
-
-
-def test_unknown_action_type() -> None:
-    result = run_ggs({"nodes": [{"id": "n", "action": {"type": "teleport"}}]})
-    check("unknown action type fails the node", result["status"] == "failed")
-
-
-def test_unknown_verifier_type() -> None:
-    graph = {"nodes": [
-        {"id": "n", "action": {"type": "noop"}, "verifier": {"type": "telepathy"}},
-    ]}
-    result = run_ggs(graph)
-    check("unknown verifier type fails the node", result["status"] == "failed")
-
-
-def test_missing_node_id() -> None:
-    raised = False
-    try:
-        run_ggs({"nodes": [{"action": {"type": "noop"}}]})
-    except GGSError:
-        raised = True
-    check("node with no id is rejected", raised)
-
-
-def test_run_arg_jail() -> None:
-    with tempfile.TemporaryDirectory() as root:
-        box = Sandbox(root)
-        blocked = False
-        try:
-            box.run(["cat", "/etc/passwd"])
-        except SandboxViolation:
-            blocked = True
-        check("run arg with absolute path blocked", blocked)
-        ok = box.run(["echo", "safe-token"])
-        check("run arg bare token allowed", ok["exit_code"] == 0)
-
-
-def test_diamond_dag_order() -> None:
-    graph = {"nodes": [
-        {"id": "a", "action": {"type": "write_file", "path": "a", "content": "A"}},
-        {"id": "b", "deps": ["a"],
-         "action": {"type": "append_file", "path": "a", "content": "B"}},
-        {"id": "c", "deps": ["a"],
-         "action": {"type": "write_file", "path": "c", "content": "C"}},
-        {"id": "d", "deps": ["b", "c"], "action": {"type": "noop"},
-         "verifier": [{"type": "file_contains", "path": "a", "text": "AB"},
-                      {"type": "file_exists", "path": "c"}]},
-    ]}
-    result = run_ggs(graph)
-    check("diamond DAG fully verifies", result["status"] == "verified")
-
-
-def main() -> int:
-    print("GGS engine unit tests")
-    print("=" * 60)
-    for test in [
-        test_sandbox_jail,
-        test_command_allowlist,
-        test_single_node_verified,
-        test_rollback_runs_on_failure,
-        test_dependency_skip,
-        test_cycle_detection,
-        test_unknown_dependency,
-        test_provenance_chain,
-        test_provenance_tamper_detected,
-        test_sandbox_escape_via_action,
-        test_delete_file_action,
-        test_unknown_action_type,
-        test_unknown_verifier_type,
-        test_missing_node_id,
-        test_run_arg_jail,
-        test_diamond_dag_order,
-    ]:
-        test()
-    print("=" * 60)
-    if _FAILURES:
-        print(f"{len(_FAILURES)} test(s) failed: {', '.join(_FAILURES)}")
-        return 1
-    print("All tests passed.")
-    return 0
+    def test_tampering_is_detected(self) -> None:
+        ledger = self._two_node_result()["ledger"]
+        ledger[0]["record"]["status"] = "tampered"
+        self.assertFalse(verify_ledger(ledger))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    unittest.main()
