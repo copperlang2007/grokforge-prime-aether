@@ -38,8 +38,11 @@ python3 src/python/test_ggs.py        # engine unit tests
 python3 benchmarks/osworld_subset.py  # capability benchmark
 ```
 
-The Tauri desktop shell (`cargo tauri dev`) requires the Rust + Tauri 2
-toolchain and a frontend in `dist/`; the Python engine above is the
+The Tauri desktop shell (`cargo tauri dev`) loads `dist/index.html` —
+a minimal vanilla-JS page that submits a sample GGS graph to the engine
+via the `execute_ggs` Tauri command and renders the JSON result. It
+requires the Rust + Tauri 2 toolchain plus the usual Linux desktop libs
+(`webkit2gtk-4.1`, `libsoup-3.0`, ...). The Python engine above is the
 runnable, tested core and needs only Python 3.
 
 ## Roadmap

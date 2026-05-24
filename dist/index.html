@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GrokForge Prime</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #2f81f7;
+      --ok: #3fb950;
+      --bad: #f85149;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 24px;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    h1 { font-size: 18px; margin: 0; }
+    header span { color: var(--muted); font-size: 13px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      min-height: 70vh;
+    }
+    section h2 {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin: 0 0 10px;
+    }
+    textarea, pre {
+      flex: 1;
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px;
+      font-family: var(--mono);
+      font-size: 13px;
+      resize: none;
+      overflow: auto;
+      white-space: pre;
+    }
+    pre { margin: 0; }
+    .controls { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: progress; }
+    .status { font-family: var(--mono); font-size: 13px; }
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GrokForge Prime</h1>
+    <span>Submit a GGS graph; the sandboxed engine returns a verified ledger.</span>
+  </header>
+
+  <main>
+    <section>
+      <h2>Graph (JSON)</h2>
+      <textarea id="graph" spellcheck="false"></textarea>
+      <div class="controls">
+        <button id="run">Execute</button>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Result</h2>
+      <pre id="output">// Result will appear here.</pre>
+    </section>
+  </main>
+
+  <script>
+    const SAMPLE = {
+      nodes: [
+        {
+          id: "write",
+          action: { type: "write_file", path: "hello.txt", content: "hello world" },
+          verifier: { type: "file_contains", path: "hello.txt", text: "hello" },
+          rollback: [{ type: "delete_file", path: "hello.txt" }]
+        }
+      ]
+    };
+
+    const graphEl = document.getElementById("graph");
+    const outputEl = document.getElementById("output");
+    const statusEl = document.getElementById("status");
+    const runBtn = document.getElementById("run");
+
+    graphEl.value = JSON.stringify(SAMPLE, null, 2);
+
+    function setStatus(text, kind) {
+      statusEl.textContent = text;
+      statusEl.className = "status" + (kind ? " " + kind : "");
+    }
+
+    async function execute() {
+      let graph;
+      try {
+        graph = JSON.parse(graphEl.value);
+      } catch (err) {
+        setStatus("invalid JSON: " + err.message, "bad");
+        return;
+      }
+
+      const invoke = window.__TAURI__?.core?.invoke;
+      if (!invoke) {
+        setStatus("Tauri bridge unavailable — open via `cargo tauri dev`.", "bad");
+        return;
+      }
+
+      runBtn.disabled = true;
+      setStatus("running...");
+      try {
+        const result = await invoke("execute_ggs", { graph });
+        outputEl.textContent = JSON.stringify(result, null, 2);
+        const ok = result?.status === "verified";
+        setStatus(ok ? "verified" : "failed", ok ? "ok" : "bad");
+      } catch (err) {
+        outputEl.textContent = String(err);
+        setStatus("engine error", "bad");
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    runBtn.addEventListener("click", execute);
+  </script>
+</body>
+</html>
