@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "identifier": "com.grokforge.prime",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "dist"
   },
   "app": {
     "windows": [
