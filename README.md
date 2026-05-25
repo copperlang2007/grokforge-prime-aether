@@ -47,7 +47,5 @@ runnable, tested core and needs only Python 3.
 
 ## Roadmap
 
-- Kernel-level isolation (Landlock / seccomp) instead of the current
-  allowlist-based sandbox.
 - WASM execution for untrusted action handlers.
-- Frontend for the Tauri shell.
+- seccomp syscall filtering on top of Landlock for the Linux path.

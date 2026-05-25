@@ -415,9 +415,13 @@ def _safe_rollback(sandbox: Sandbox, action: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 def main(argv: list[str]) -> int:
     raw = Path(argv[1]).read_text() if len(argv) > 1 else sys.stdin.read()
+    # The Rust shell hands a pre-created workdir via GGS_WORKDIR so it can
+    # apply a Landlock ruleset that only permits writes to that directory.
+    # When unset (e.g. direct CLI use), the engine creates its own tempdir.
+    workdir = os.environ.get("GGS_WORKDIR") or None
     try:
         graph = json.loads(raw)
-        result = run_ggs(graph)
+        result = run_ggs(graph, workdir=workdir)
     except (GGSError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "error", "error": str(exc)}))
         return 1
