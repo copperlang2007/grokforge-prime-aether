@@ -43,5 +43,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo check
-        run: cargo check --verbose
+      - name: cargo test
+        run: cargo test --verbose --no-fail-fast

@@ -51,7 +51,21 @@ A GGS graph is a DAG of nodes:
 
 ### Trust boundary
 
-The sandbox is process-level: a resolved-path jail plus a command
-allowlist. It stops accidental and casual escapes, not a determined
-adversary with allowlisted-command tricks. Kernel-level isolation
-(Landlock / seccomp / WASM) is on the roadmap.
+Two layers, enforced independently:
+
+1. **User-space sandbox in the engine** — a resolved-path jail, a
+   command allowlist (no interpreters), and path-like argument
+   checking. Catches malformed graphs and accidental escapes before
+   anything touches the kernel.
+2. **Kernel-level Landlock ruleset, applied by the Rust shell** on
+   Linux. The shell creates a per-call workdir, hands it to the
+   engine via `GGS_WORKDIR`, and applies a Landlock filesystem
+   ruleset to the child process before exec: read-only on the
+   system roots the interpreter needs (`/usr`, `/bin`, `/lib`,
+   `/etc`, `/proc`, `/dev`), read-write only on the workdir.
+   Even if the user-space sandbox had a bug, writes outside the
+   workdir would be denied by the kernel. On a kernel without
+   Landlock (older than 5.13, or a container that masks it),
+   Landlock is a no-op and only layer 1 applies.
+
+WASM execution for untrusted action handlers is still on the roadmap.

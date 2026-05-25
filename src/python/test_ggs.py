@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ggs_engine import (
@@ -202,6 +203,27 @@ class TestVerifiers(SandboxTestCase):
     def test_unknown_verifier_type(self) -> None:
         with self.assertRaises(GGSError):
             verify(self.box, {"type": "telepathy"})
+
+
+class TestWorkdirHandoff(unittest.TestCase):
+    """The Rust shell pre-creates the workdir so it can be Landlocked.
+
+    Verify ``run_ggs`` uses an externally supplied workdir verbatim and
+    does not clean it up, so the caller can inspect / control the path.
+    """
+
+    def test_uses_external_workdir(self) -> None:
+        external = tempfile.TemporaryDirectory(prefix="ggs_external_")
+        self.addCleanup(external.cleanup)
+        run_ggs(
+            {"nodes": [
+                {"id": "n", "action": {"type": "write_file",
+                                       "path": "out.txt", "content": "x"}},
+            ]},
+            workdir=external.name,
+        )
+        self.assertTrue((Path(external.name) / "out.txt").is_file(),
+                        "engine wrote to a different workdir")
 
 
 class TestEngine(unittest.TestCase):
