@@ -227,3 +227,98 @@ pub fn run_ggs(graph: serde_json::Value) -> Result<serde_json::Value, String> {
 
     Ok(result)
 }
+
+/// How much WASM "fuel" a single call may burn. One unit roughly
+/// corresponds to one executed instruction; a million is enough for
+/// realistic compute and short enough to bound runaway loops.
+///
+/// Note: fuel is consumed only during exported function *execution*,
+/// not during module compilation or instantiation. Memory/table growth
+/// is bounded separately by [`WASM_MEMORY_LIMIT`] and
+/// [`WASM_TABLE_ELEMENT_LIMIT`].
+pub const WASM_FUEL_LIMIT: u64 = 1_000_000;
+
+/// Maximum linear-memory size the module may grow to. Wasmtime's default
+/// is 4 GiB per memory; without an explicit cap, a malicious module
+/// could request a huge memory at instantiation time and OOM the host.
+pub const WASM_MEMORY_LIMIT: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Maximum number of elements across all tables in the module.
+pub const WASM_TABLE_ELEMENT_LIMIT: usize = 10_000;
+
+/// Run a function exported by a WebAssembly module in a no-capability
+/// sandbox: no host imports are linked, so the module has no syscalls,
+/// no filesystem, and no network. Bounded on three axes:
+///
+/// - **CPU**: fuel-limited to [`WASM_FUEL_LIMIT`] instructions per call.
+/// - **Memory**: linear memory capped at [`WASM_MEMORY_LIMIT`] via a
+///   `StoreLimiter`. Modules that request a larger memory fail to
+///   instantiate instead of being allowed to OOM the host.
+/// - **Tables**: total elements capped at [`WASM_TABLE_ELEMENT_LIMIT`].
+///
+/// Returns the exported function's i32 results. Only i32 args and
+/// results are supported by this primitive — enough to be useful for
+/// verifier predicates and arithmetic action handlers without exposing
+/// the full Val enum at the API boundary. Engine integration (a `wasm`
+/// action / verifier type that lets a graph carry a module) is a
+/// follow-up PR.
+pub fn run_wasm_module(
+    module_bytes: &[u8],
+    func_name: &str,
+    args: &[i32],
+) -> Result<Vec<i32>, String> {
+    use wasmtime::{
+        Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder,
+        Val, ValType,
+    };
+
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    // Wasmtime errors are anyhow chains; `{:#}` flattens the chain into a
+    // single string so callers (and tests) see the real trap reason, not
+    // just the top-level "error while executing" line.
+    let engine = Engine::new(&config).map_err(|e| format!("{e:#}"))?;
+    let module = Module::new(&engine, module_bytes).map_err(|e| format!("{e:#}"))?;
+
+    // Empty linker → the module cannot import anything from the host.
+    let linker: Linker<StoreLimits> = Linker::new(&engine);
+
+    // The store carries a StoreLimits as its data and uses it as a
+    // ResourceLimiter — this is what enforces the memory and table caps
+    // during instantiation and during memory.grow / table.grow calls.
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(WASM_MEMORY_LIMIT)
+        .table_elements(WASM_TABLE_ELEMENT_LIMIT)
+        .build();
+    let mut store = Store::new(&engine, limits);
+    store.limiter(|s| s);
+    store.set_fuel(WASM_FUEL_LIMIT).map_err(|e| format!("{e:#}"))?;
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("{e:#}"))?;
+    let func = instance
+        .get_func(&mut store, func_name)
+        .ok_or_else(|| format!("module has no export named {func_name:?}"))?;
+
+    let ty = func.ty(&store);
+    let mut results: Vec<Val> = ty
+        .results()
+        .map(|t| match t {
+            ValType::I32 => Ok(Val::I32(0)),
+            other => Err(format!("unsupported result type {other:?}; only i32 is supported")),
+        })
+        .collect::<Result<_, _>>()?;
+    let wasm_args: Vec<Val> = args.iter().map(|a| Val::I32(*a)).collect();
+
+    func.call(&mut store, &wasm_args, &mut results)
+        .map_err(|e| format!("{e:#}"))?;
+
+    results
+        .into_iter()
+        .map(|v| match v {
+            Val::I32(n) => Ok(n),
+            other => Err(format!("non-i32 result {other:?}")),
+        })
+        .collect()
+}
