@@ -47,4 +47,5 @@ runnable, tested core and needs only Python 3.
 
 ## Roadmap
 
-- WASM execution for untrusted action handlers.
+- Wire the WASM compute primitive (`grokforge_prime::run_wasm_module`)
+  into a GGS action / verifier type so graphs can carry modules.
