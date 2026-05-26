@@ -51,21 +51,26 @@ A GGS graph is a DAG of nodes:
 
 ### Trust boundary
 
-Two layers, enforced independently:
+Three layers, enforced independently:
 
 1. **User-space sandbox in the engine** — a resolved-path jail, a
    command allowlist (no interpreters), and path-like argument
    checking. Catches malformed graphs and accidental escapes before
    anything touches the kernel.
-2. **Kernel-level Landlock ruleset, applied by the Rust shell** on
+2. **Landlock filesystem ruleset, applied by the Rust shell** on
    Linux. The shell creates a per-call workdir, hands it to the
-   engine via `GGS_WORKDIR`, and applies a Landlock filesystem
-   ruleset to the child process before exec: read-only on the
-   system roots the interpreter needs (`/usr`, `/bin`, `/lib`,
-   `/etc`, `/proc`, `/dev`), read-write only on the workdir.
-   Even if the user-space sandbox had a bug, writes outside the
-   workdir would be denied by the kernel. On a kernel without
-   Landlock (older than 5.13, or a container that masks it),
-   Landlock is a no-op and only layer 1 applies.
+   engine via `GGS_WORKDIR`, and restricts the child to read-only
+   on the system roots the interpreter needs (`/usr`, `/bin`,
+   `/lib`, `/etc`, `/proc`, `/dev`) and read-write only on the
+   workdir. Even if the user-space sandbox had a bug, writes
+   outside the workdir would be denied by the kernel. No-op on
+   kernels older than 5.13.
+3. **seccomp BPF filter**, also applied in `pre_exec` after
+   Landlock. Denies syscalls a sandboxed engine should never make:
+   `socket(AF_INET/AF_INET6, ...)` (no IP networking — AF_UNIX is
+   intentionally still allowed for the interpreter's own pipes),
+   `ptrace`, `mount`, `umount2`, `pivot_root`. Default is allow,
+   so Python's normal syscalls keep working; only the listed ones
+   return `EPERM`.
 
 WASM execution for untrusted action handlers is still on the roadmap.

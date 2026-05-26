@@ -48,4 +48,3 @@ runnable, tested core and needs only Python 3.
 ## Roadmap
 
 - WASM execution for untrusted action handlers.
-- seccomp syscall filtering on top of Landlock for the Linux path.

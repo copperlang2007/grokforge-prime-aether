@@ -85,6 +85,73 @@ pub fn apply_landlock(workdir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Apply a seccomp BPF filter that denies syscalls the engine never needs:
+/// network sockets on AF_INET/AF_INET6, raw debugging (`ptrace`), and
+/// mount-table changes. Everything else stays allowed — a denylist suits
+/// Python better than an allowlist, which would break the interpreter.
+///
+/// Layered on top of Landlock: Landlock confines the filesystem, seccomp
+/// closes off the non-filesystem syscalls a sandboxed engine should never
+/// touch. Called from `Command::pre_exec`, same as `apply_landlock`.
+#[cfg(target_os = "linux")]
+pub fn apply_seccomp() -> std::io::Result<()> {
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp,
+        SeccompCondition, SeccompFilter, SeccompRule,
+    };
+
+    let arch = std::env::consts::ARCH
+        .try_into()
+        .map_err(std::io::Error::other)?;
+    let denied = SeccompAction::Errno(libc::EPERM as u32);
+    let allowed = SeccompAction::Allow;
+
+    let inet = SeccompCondition::new(
+        0,
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        libc::AF_INET as u64,
+    )
+    .map_err(std::io::Error::other)?;
+    let inet6 = SeccompCondition::new(
+        0,
+        SeccompCmpArgLen::Dword,
+        SeccompCmpOp::Eq,
+        libc::AF_INET6 as u64,
+    )
+    .map_err(std::io::Error::other)?;
+
+    let mut rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
+        std::collections::BTreeMap::new();
+
+    // socket(AF_INET, ...) and socket(AF_INET6, ...) — block IP networking.
+    // AF_UNIX is intentionally still allowed so Python's internal pipes work.
+    rules.insert(
+        libc::SYS_socket as i64,
+        vec![
+            SeccompRule::new(vec![inet]).map_err(std::io::Error::other)?,
+            SeccompRule::new(vec![inet6]).map_err(std::io::Error::other)?,
+        ],
+    );
+
+    // Syscalls with no useful purpose inside a sandboxed engine. An empty
+    // rules vec means "match any invocation of this syscall".
+    for sys in [
+        libc::SYS_ptrace,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+    ] {
+        rules.insert(sys as i64, vec![]);
+    }
+
+    let filter = SeccompFilter::new(rules, allowed, denied, arch)
+        .map_err(std::io::Error::other)?;
+    let program: BpfProgram = filter.try_into().map_err(std::io::Error::other)?;
+    seccompiler::apply_filter(&program).map_err(std::io::Error::other)?;
+    Ok(())
+}
+
 /// Execute a GGS graph: create a per-call tempdir, hand it to the Python
 /// engine via `GGS_WORKDIR`, apply Landlock to the child on Linux, and
 /// return the engine's parsed JSON result.
@@ -108,9 +175,16 @@ pub fn run_ggs(graph: serde_json::Value) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "linux")]
     {
         let wd = workdir_path.clone();
-        // SAFETY: pre_exec runs between fork and exec; the landlock crate
-        // only calls async-signal-safe operations from this closure.
-        unsafe { cmd.pre_exec(move || apply_landlock(&wd)) };
+        // SAFETY: pre_exec runs between fork and exec; the landlock and
+        // seccompiler crates only call async-signal-safe operations from
+        // these closures. Seccomp is applied last so the filter sees the
+        // smallest possible set of remaining capabilities.
+        unsafe {
+            cmd.pre_exec(move || {
+                apply_landlock(&wd)?;
+                apply_seccomp()
+            })
+        };
     }
 
     let mut child = cmd
